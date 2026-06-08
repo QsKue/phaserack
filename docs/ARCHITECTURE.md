@@ -1,11 +1,11 @@
 # Architecture
 
-This document describes the structure of the `warble` crate. Keep it aligned with `AGENTS.md` and
+This document describes the structure of the `phaserack` crate. Keep it aligned with `AGENTS.md` and
 update it when the `TimeStretcher` contract, module boundaries, or data flow change.
 
 ## Shape
 
-`warble` is a single library crate with a tiny module tree:
+`phaserack` is a single library crate with a tiny module tree:
 
 ```text
 lib.rs            crate root: module declarations + re-exports
@@ -15,8 +15,8 @@ lib.rs            crate root: module declarations + re-exports
 
 The contract (`stretcher.rs`) is the public surface every consumer codes against; backends are
 implementations of it. There is no engine, no session, no async, no I/O. The only unconditional
-dependency is **prism** (for `Latency`); the backend adds `signalsmith-stretch`, but only when the
-`signalsmith` feature is on. warble is the leaf; the `maestro` engine drives it through the trait and
+dependency is **SineRack** (for `Latency`); the backend adds `signalsmith-stretch`, but only when the
+`signalsmith` feature is on. PhaseRack is the leaf; the `mixrack` engine drives it through the trait and
 is the hub for the wider audio docs.
 
 ## Public API
@@ -29,7 +29,7 @@ The public contract is intentionally small:
              sample_rate: u32, channels: usize) -> TimeStretchProcessResult;
   fn flush(&mut self, output: &mut [f32], sample_rate: u32, channels: usize) -> usize;
   fn reset(&mut self);
-  fn latency(&self) -> prism::Latency;
+  fn latency(&self) -> sinerack::Latency;
   fn capabilities(&self) -> TimeStretcherCapabilities;
   fn set_params(&mut self, params: TimeStretcherParams);
   fn params(&self) -> TimeStretcherParams;
@@ -62,7 +62,7 @@ loop over input blocks:
   (consume `input_frames_consumed`, emit `output_frames_written`; repeat)
 after the last input block:
   flush(output, ...) -> writes tail frames, returns count; repeat until it returns 0
-latency() -> prism::Latency, summed by the engine across pipeline stages
+latency() -> sinerack::Latency, summed by the engine across pipeline stages
 reset() between independent streams
 ```
 
@@ -74,14 +74,14 @@ drains. `NoopTimeStretcher` copies `min(input, output)` frames straight through 
 ## Key design properties
 
 - **One uniform trait.** Every stretcher implements `TimeStretcher`; backends are added as modules,
-  not by widening the trait for one of them. The trait lives **here in the leaf**, not in prism —
+  not by widening the trait for one of them. The trait lives **here in the leaf**, not in SineRack —
   see ADR 0001.
-- **Latency via prism.** `latency()` returns `prism::Latency` so the engine can add it to the other
-  stages. warble does not define its own latency type.
+- **Latency via SineRack.** `latency()` returns `sinerack::Latency` so the engine can add it to the other
+  stages. PhaseRack does not define its own latency type.
 - **Feature-gated backend.** The trait, the value types, and `NoopTimeStretcher` are dependency-free
-  beyond `prism`. The real DSP backend sits behind the `signalsmith` feature (on by default) so a
+  beyond `sinerack`. The real DSP backend sits behind the `signalsmith` feature (on by default) so a
   consumer can use the contract + Noop without pulling `signalsmith-stretch`.
-- **Engine-agnostic.** No session/source/routing concepts. warble transforms a caller-provided
+- **Engine-agnostic.** No session/source/routing concepts. PhaseRack transforms a caller-provided
   interleaved buffer; the engine owns scheduling and policy.
 
 ## Testing & checks

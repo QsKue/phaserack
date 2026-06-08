@@ -1,13 +1,13 @@
-# warble
+# PhaseRack
 
 **Time-stretching and pitch-shifting** for the q-lib audio engine — a leaf DSP
 crate in the audio split, built on the shared
-[`prism`](https://github.com/QsKue/prism) core.
+[`sinerack`](https://github.com/QsKue/sinerack) core.
 
-warble owns the `TimeStretcher` contract (change a signal's length and/or pitch,
-independently) and its implementations. The [`maestro`](https://github.com/QsKue/maestro)
-engine drives stretchers through this trait; warble carries no engine/session
-knowledge of its own. Stretchers report their delay as a `prism::Latency` so the
+PhaseRack owns the `TimeStretcher` contract (change a signal's length and/or pitch,
+independently) and its implementations. The [`mixrack`](https://github.com/QsKue/mixrack)
+engine drives stretchers through this trait; PhaseRack carries no engine/session
+knowledge of its own. Stretchers report their delay as a `sinerack::Latency` so the
 engine can sum it across the pipeline.
 
 ## Implementations

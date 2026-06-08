@@ -3,7 +3,7 @@
 Source: `src/stretcher.rs`
 
 The crate's public contract: the `TimeStretcher` trait, its value types, and the pass-through
-`NoopTimeStretcher`. This module is **dependency-free beyond `prism::Latency`** — no DSP, no backend
+`NoopTimeStretcher`. This module is **dependency-free beyond `sinerack::Latency`** — no DSP, no backend
 code — so a consumer can use the contract and the Noop stretcher without the `signalsmith` feature.
 Backends (e.g. `signalsmith.rs`) implement this trait; they live in their own modules.
 
@@ -11,7 +11,7 @@ Backends (e.g. `signalsmith.rs`) implement this trait; they live in their own mo
 
 - **`TimeStretcher: Send`** — the trait every stretcher implements. Operates on **interleaved `f32`**:
   `process` (transform input into a separate output buffer), `flush` (drain the tail), `reset`,
-  `latency` (`-> prism::Latency`), `capabilities`, `set_params`, `params`.
+  `latency` (`-> sinerack::Latency`), `capabilities`, `set_params`, `params`.
 - **`TimeStretcherCapabilities`** — `realtime`, `pitch_shift`, `time_stretch`,
   `independent_pitch_and_speed`. `noop()` is the pass-through profile (realtime, no transform).
   `supports_realtime_autotune()` = `realtime && pitch_shift && independent_pitch_and_speed` — the
@@ -41,8 +41,8 @@ Backends (e.g. `signalsmith.rs`) implement this trait; they live in their own mo
 
 - Backend/DSP code or any `signalsmith-stretch` reference — that lives in `src/signalsmith.rs` behind
   the feature. This module must keep building with the `signalsmith` feature off.
-- A local latency type. `latency()` returns `prism::Latency`; don't reintroduce maestro's old
-  `AudioLatency` (it was folded into `prism::Latency` — see ADR 0001).
+- A local latency type. `latency()` returns `sinerack::Latency`; don't reintroduce MixRack's old
+  `AudioLatency` (it was folded into `sinerack::Latency` — see ADR 0001).
 - Engine/session concepts.
 
 ## Gotchas

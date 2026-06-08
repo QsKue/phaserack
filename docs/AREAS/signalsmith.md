@@ -37,7 +37,7 @@ contract + Noop stay dependency-free.
   `output_latency()`. `flush` then drains it `min(tail, output_capacity)` frames at a time,
   decrementing the counter, and must be called until it returns `0` to get all tail audio. `reset`
   zeroes the counter and resets the underlying stretch.
-- **Latency.** `latency()` reports `prism::Latency::new(input_latency(), output_latency(), 0)` from
+- **Latency.** `latency()` reports `sinerack::Latency::new(input_latency(), output_latency(), 0)` from
   the underlying stretch — input + output delay, no extra processing block.
 - **Capabilities are constant `true`** for this backend; it genuinely does independent pitch and
   speed. Don't relax these without changing behavior.

@@ -1,4 +1,4 @@
-use prism::Latency;
+use sinerack::Latency;
 
 /// What a stretcher can do, so callers can pick one that fits (e.g. realtime
 /// autotune needs independent pitch and speed control with low latency).

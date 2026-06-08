@@ -1,19 +1,19 @@
 # AGENTS.md
 
-`warble` is a small Rust **library crate** (edition 2024, `AGPL-3.0-or-later`) that **time-stretches
+`phaserack` is a small Rust **library crate** (edition 2024, `AGPL-3.0-or-later`) that **time-stretches
 and pitch-shifts** interleaved `f32` audio — it changes a signal's length and/or pitch. It is a
 **leaf** in the q-lib audio split: it owns the `TimeStretcher` contract and its implementations and
-nothing else — no engine, no session, no I/O, no async. It depends only on **prism** for the shared
+nothing else — no engine, no session, no I/O, no async. It depends only on **SineRack** for the shared
 `Latency` value type. Keep changes minimal, allocation-conscious on the hot path, and
 engine-agnostic.
 
-**Consumer / workspace context.** warble was **extracted out of the `maestro` engine** (it used to
-live in `maestro/src/sources/time_stretchers/`). maestro now re-exports warble's types and keeps
+**Consumer / workspace context.** PhaseRack was **extracted out of the `mixrack` engine** (it used to
+live in `mixrack/src/sources/time_stretchers/`). MixRack now re-exports PhaseRack's types and keeps
 only a session-aware `build_time_stretcher` factory; it drives stretchers **through the
-`TimeStretcher` trait**. The trait used to return maestro's `AudioLatency`; that type was folded
-into `prism::Latency`, which `latency()` now returns. maestro is the **hub / main entry point** for
-the audio docs ([QsKue/maestro](https://github.com/QsKue/maestro)); **prism** is the shared base
-([QsKue/prism](https://github.com/QsKue/prism)). warble must stand alone — build and reason about it
+`TimeStretcher` trait**. The trait used to return MixRack's `AudioLatency`; that type was folded
+into `sinerack::Latency`, which `latency()` now returns. MixRack is the **hub / main entry point** for
+the audio docs ([QsKue/mixrack](https://github.com/QsKue/mixrack)); **SineRack** is the shared base
+([QsKue/sinerack](https://github.com/QsKue/sinerack)). PhaseRack must stand alone — build and reason about it
 without the engine — and must not gain engine/session knowledge. All three crates are git submodules
 and path workspace members.
 
@@ -33,7 +33,7 @@ and path workspace members.
 - `src/stretcher.rs` — the **contract**: the `TimeStretcher` trait
   (`process`/`flush`/`reset`/`latency`/`capabilities`/`set_params`/`params` on interleaved `f32`),
   the value types `TimeStretcherCapabilities` / `TimeStretcherParams` / `TimeStretchProcessResult`,
-  and `NoopTimeStretcher` (pass-through). Dependency-free beyond `prism::Latency`.
+  and `NoopTimeStretcher` (pass-through). Dependency-free beyond `sinerack::Latency`.
 - `src/signalsmith.rs` — `SignalSmithTimeStretcher`, the real backend over `signalsmith-stretch`,
   **behind the `signalsmith` feature** (on by default). The only thing that pulls a DSP dependency.
 
@@ -48,7 +48,7 @@ and path workspace members.
   fills the output.
 - **Tail via `flush`.** After the final input block, `flush` writes remaining tail frames (returns
   the frame count) until it returns `0`. Don't expect tail audio out of `process`.
-- **Report latency as `prism::Latency`.** `latency()` returns a `prism::Latency` so the engine can
+- **Report latency as `sinerack::Latency`.** `latency()` returns a `sinerack::Latency` so the engine can
   sum it across pipeline stages. Don't invent a local latency type.
 - **Guard the format.** A backend validates `(sample_rate, channels)` against what it was built with
   (`format_matches`) and `channels == 0`, returning an empty result rather than processing a
@@ -56,14 +56,14 @@ and path workspace members.
 - **Capabilities are honest.** `TimeStretcherCapabilities` advertises what a stretcher can actually
   do; `supports_realtime_autotune()` = `realtime && pitch_shift && independent_pitch_and_speed`.
   Callers pick a stretcher by capability — keep the flags truthful.
-- **Stay engine-agnostic and small.** No session, routing, device, or pipeline concepts. warble
+- **Stay engine-agnostic and small.** No session, routing, device, or pipeline concepts. PhaseRack
   transforms a buffer the caller provides; the engine decides when and why.
 
 ## Warning signs
 
 - A method assumes `process` drained the input or filled the output instead of reading
   `TimeStretchProcessResult`.
-- `latency()` returns something other than `prism::Latency`, or a local latency type creeps back in.
+- `latency()` returns something other than `sinerack::Latency`, or a local latency type creeps back in.
 - The `signalsmith` backend's `format_matches` / `channels == 0` guard is dropped, so a mismatched
   buffer reaches the DSP.
 - The trait grows a method to suit exactly one backend, or `stretcher.rs` gains a dependency on

@@ -1,4 +1,4 @@
-use prism::Latency;
+use sinerack::Latency;
 
 use crate::stretcher::{
     TimeStretchProcessResult, TimeStretcher, TimeStretcherCapabilities, TimeStretcherParams,
