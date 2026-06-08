@@ -1,0 +1,19 @@
+[package]
+name = "warble"
+description = "Time-stretching and pitch-shifting for the q-lib audio engine."
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/QsKue/warble"
+readme = "README.md"
+
+[features]
+default = ["signalsmith"]
+# The Signalsmith-backed realtime stretcher/pitch-shifter. Off-by-default-`false`
+# consumers (e.g. maestro) gate it behind their own feature so the trait + the
+# Noop stretcher stay available without pulling the backend.
+signalsmith = ["dep:signalsmith-stretch"]
+
+[dependencies]
+prism = { path = "../prism" }
+signalsmith-stretch = { version = "0.1.3", optional = true }
