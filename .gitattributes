@@ -1,0 +1,3 @@
+# Normalize line endings: store and check out text files as LF so the Windows
+# autocrlf "LF will be replaced by CRLF" warnings stop and endings stay consistent.
+* text=auto eol=lf

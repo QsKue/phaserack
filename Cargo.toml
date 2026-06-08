@@ -15,5 +15,10 @@ default = ["signalsmith"]
 signalsmith = ["dep:signalsmith-stretch"]
 
 [dependencies]
-prism = { path = "../prism" }
+prism = { git = "https://github.com/QsKue/prism" }
 signalsmith-stretch = { version = "0.1.3", optional = true }
+
+# Standalone, independently-buildable crate, also checked out inside the q-lib
+# workspace where it is consumed via a `[patch]` path redirect. `[workspace]`
+# keeps Cargo from absorbing it as a member (a patch target cannot be a member).
+[workspace]
