@@ -95,7 +95,11 @@ impl TimeStretcher for SignalSmithTimeStretcher {
     }
 
     fn latency(&self) -> Latency {
-        Latency::new(self.stretch.input_latency(), self.stretch.output_latency(), 0)
+        Latency::new(
+            self.stretch.input_latency(),
+            self.stretch.output_latency(),
+            0,
+        )
     }
 
     fn capabilities(&self) -> TimeStretcherCapabilities {

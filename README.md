@@ -13,6 +13,9 @@ engine can sum it across the pipeline.
 ## Implementations
 
 - **`NoopTimeStretcher`** — pass-through; the default and a test baseline.
+- **`WsolaTimeStretcher`** — dependency-free time-domain (Waveform Similarity Overlap-Add)
+  **time-stretcher** (pitch-preserving speed change); available in all builds. Pitch shifting on
+  this backend is a planned later increment.
 - **`SignalSmithTimeStretcher`** — realtime stretcher/pitch-shifter backed by
   `signalsmith-stretch`, behind the `signalsmith` feature (on by default).
 

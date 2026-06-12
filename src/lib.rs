@@ -9,11 +9,13 @@
 //! it with the other pipeline stages.
 
 mod stretcher;
+mod time_domain;
 
 pub use stretcher::{
     NoopTimeStretcher, TimeStretchProcessResult, TimeStretcher, TimeStretcherCapabilities,
     TimeStretcherParams,
 };
+pub use time_domain::WsolaTimeStretcher;
 
 #[cfg(feature = "signalsmith")]
 mod signalsmith;

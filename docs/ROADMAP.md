@@ -4,8 +4,19 @@ The planned direction for `phaserack`. The crate's job is narrow and stable: own
 contract and provide a useful set of stretcher/pitch-shifter backends behind it. Growth means
 **adding backends** under the existing trait, not widening the trait.
 
+Backends are bucketed by domain, the same way `pitchrack` groups its detectors —
+`time_domain/` (grain overlap-add), `frequency_domain/` (spectral / phase vocoder),
+`parametric/` (model resynthesis). A wrapped third-party algorithm (`signalsmith`) stays its own
+module, outside the domain folders, because it is code we adapt rather than own.
+
+The priority order is **autotune-first**: build the families that benefit realtime, formant-aware,
+monophonic vocal pitch-shifting first, and keep everything else documented for a future
+"for completion" version so nothing we learned is lost. The durable rationale — the three-family
+taxonomy, the 2026-06 research survey, the namespace convention, and why we wrap external libraries —
+is in [ADR 0002](DECISIONS/0002-stretcher-taxonomy-and-autotune-first-roadmap.md).
+
 Keep this file current: check items off as they land (git is the detailed task log). Each backend
-should document its capabilities, latency characteristics, and gotchas in its `docs/AREAS/*` entry.
+documents its capabilities, latency, and gotchas in its `docs/AREAS/*` entry.
 
 ---
 
@@ -17,28 +28,76 @@ should document its capabilities, latency characteristics, and gotchas in its `d
 - **`NoopTimeStretcher`** — pass-through; the default and a test baseline. Dependency-free.
 - **`SignalSmithTimeStretcher`** — realtime general-purpose time-stretcher **and** pitch-shifter over
   `signalsmith-stretch`, with independent pitch and speed control, behind the `signalsmith` feature
-  (on by default).
+  (on by default). A *wrapped* third-party backend (adapter pattern): the engine's quality baseline
+  and the reference our own backends are A/B'd against. See ADR 0002 §4 for why we wrap.
 
 ---
 
-## Plausible future backends (speculative — not scheduled)
+## Active plan — autotune-first
 
-> Everything below is **speculative**. These are real, well-documented techniques that *could* land
-> as additional `TimeStretcher` backends if a concrete need appears; none is committed. Promote one
-> into the active list only when a consumer actually needs it. Each would be a new module, likely
-> behind its own cargo feature so minimal builds stay minimal.
+Build in this order; each is a new module implementing `TimeStretcher`, with honest capabilities,
+`sinerack::Latency`, its own cargo feature if it pulls a dep, and a `docs/AREAS/*` entry.
 
-A family of classic time-scale-modification backends, roughly lightest → heaviest:
+1. **WSOLA** → `time_domain/` — ✅ **increment 1 (time-stretch core) done**
+   (`WsolaTimeStretcher`, [docs/AREAS/wsola.md](AREAS/wsola.md)). Waveform Similarity Overlap-Add:
+   time-domain, similarity-search-aligned grain overlap-add. Dependency-free (FFT-free), available in
+   all builds. Streaming, multichannel, pitch-preserving time-stretch with honest capabilities
+   (`pitch_shift: false`). Validates the trait beyond Noop.
+   ⏳ *Increment 2 — pitch shift via time-stretch-then-resample* (flip `pitch_shift: true`) is the
+   remaining WSOLA work; needs a resampler.
+2. **PSOLA** → `time_domain/` — *the high-value autotune backend.* Pitch-Synchronous Overlap-Add:
+   grains anchored to detected **pitch marks**, so it preserves formants for free — the classic
+   monophonic vocal pitch-shifter. Pairs with a `pitchrack` detector; this is where our own stack
+   stops being "we wrapped signalsmith." The **pitch-mark contract** between pitchrack and phaserack
+   is the key design question and gets its own ADR when this starts.
+3. **SMS — sinusoids + residual** → `parametric/` — *ambitious, differentiated; not before 1–2 are
+   proven.* Spectral Modelling Synthesis reusing `sinerack` (sinusoids) + `noiserack` (stochastic
+   residual) + `pitchrack` (F0): independent pitch / time / formant control by construction. Highest
+   voice quality of the planned set, heaviest, bounded by analysis accuracy. Park as its own ADR.
 
-- **WSOLA** (Waveform Similarity Overlap-Add) — time-domain, cross-correlation-aligned overlap-add.
-  Cheap and low-latency; good for moderate stretch ratios on monophonic/voiced material. The natural
-  FFT-free counterpart to the spectral methods.
-- **Phase vocoder** — STFT analysis/synthesis with phase propagation (optionally phase-locked /
-  identity-phase-locked to reduce smearing). The reference spectral stretcher; more flexible across
-  ratios than WSOLA, at higher compute and latency cost.
-- **PSOLA** (Pitch-Synchronous Overlap-Add) — overlap-add anchored to detected pitch marks; strong
-  on monophonic voice, but needs pitch marking (would pair with a detector from `pitchrack`).
+---
 
-If any of these lands, it implements `TimeStretcher` like the existing backends, advertises honest
-`TimeStretcherCapabilities`, reports its `sinerack::Latency`, and gets a `docs/AREAS/*` entry. The trait
-is expected to stay as-is; revisit it only if a real backend needs a capability it cannot express.
+## For completion — documented, not scheduled
+
+Real, well-documented techniques kept on record (ADR 0002 §1–2) so a future "completeness" version
+can pick them up without re-researching. None is committed; promote one only when a consumer needs
+it.
+
+### Time-domain (`time_domain/`)
+
+- **OLA / SOLA** — the simpler ancestors of WSOLA; mostly of reference value once WSOLA exists.
+
+### Frequency-domain (`frequency_domain/`)
+
+- **Phase vocoder (classic + phase-locked)** — STFT analysis/synthesis with phase propagation,
+  optionally identity-phase-locked (Laroche–Dolson) to reduce smearing. *Deliberately not planned*
+  while `signalsmith` covers this quadrant — re-implementing it is effort without new capability.
+- **PGHI / RTPGHI — "Phase Vocoder Done Right"** (Průša & Holighaus,
+  https://arxiv.org/pdf/2202.07382). The modern phase-coherence upgrade: integrate STFT phase
+  gradients via heap integration, enforcing horizontal+vertical coherence even for broadband content.
+  RTPGHI is the streaming variant. The reason to ever own a spectral backend — relevant only if we
+  decide to drop the external `signalsmith` dependency.
+
+### Parametric (`parametric/`)
+
+- **Sinusoidal modelling (McAulay–Quatieri)** — the pure-sinusoid ancestor of SMS; the analysis core
+  SMS builds on (`sinerack`).
+- **WORLD / STRAIGHT-style vocoder** — F0 + spectral envelope + aperiodicity; the highest-quality
+  classical voice manipulation, fully formant-decoupled. Heavier analysis than SMS; we already own
+  F0 (`pitchrack`).
+
+### Neural — far future
+
+- **Neural / DDSP vocoders** — CLPCNet (https://arxiv.org/pdf/2110.02360) and 2024–2025
+  differentiable-DSP vocoders (https://www2.eecs.berkeley.edu/Pubs/TechRpts/2024/EECS-2024-202.pdf),
+  some already realtime on adequate hardware. Best voice quality. A neural backend would implement
+  `TimeStretcher` like any other and declare its own `realtime` capability for the hardware it needs
+  (CPU/GPU/NPU). Far-future, not excluded: the blocker is the heavy runtime + model-weights
+  dependency (much larger than `signalsmith`) and a quality-vs-effort tradeoff that is not there yet.
+
+---
+
+Whatever lands, it implements `TimeStretcher` like the existing backends, advertises honest
+`TimeStretcherCapabilities`, reports its `sinerack::Latency`, and gets a `docs/AREAS/*` entry. The
+trait is expected to stay as-is; revisit it only if a real backend needs a capability it cannot
+express (ADR 0001).
