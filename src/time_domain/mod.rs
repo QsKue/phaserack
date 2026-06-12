@@ -6,6 +6,10 @@
 //! See `docs/DECISIONS/0002-stretcher-taxonomy-and-autotune-first-roadmap.md` for
 //! how this namespace fits the wider backend taxonomy.
 
+#[cfg(feature = "psola")]
+mod psola;
 mod wsola;
 
+#[cfg(feature = "psola")]
+pub use psola::{PsolaConfig, PsolaMode, PsolaTimeStretcher};
 pub use wsola::WsolaTimeStretcher;

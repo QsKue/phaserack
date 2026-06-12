@@ -17,6 +17,9 @@ pub use stretcher::{
 };
 pub use time_domain::WsolaTimeStretcher;
 
+#[cfg(feature = "psola")]
+pub use time_domain::{PsolaConfig, PsolaMode, PsolaTimeStretcher};
+
 #[cfg(feature = "signalsmith")]
 mod signalsmith;
 

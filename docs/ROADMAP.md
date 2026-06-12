@@ -49,11 +49,15 @@ Build in this order; each is a new module implementing `TimeStretcher`, with hon
      speed (`pitch_shift`/`independent_pitch_and_speed` become `true`). The resampler backend is the
      caller's choice (std vs `no_std` swappable at runtime); `pitch-shift` pulls only samplerack's
      trait, so phaserack stays FFT-free. WSOLA now satisfies `supports_realtime_autotune()`.
-2. **PSOLA** → `time_domain/` — *the high-value autotune backend.* Pitch-Synchronous Overlap-Add:
-   grains anchored to detected **pitch marks**, so it preserves formants for free — the classic
-   monophonic vocal pitch-shifter. Pairs with a `pitchrack` detector; this is where our own stack
-   stops being "we wrapped signalsmith." The **pitch-mark contract** between pitchrack and phaserack
-   is the key design question and gets its own ADR when this starts.
+2. **PSOLA** → `time_domain/` — ✅ **done** (`PsolaTimeStretcher`, feature `psola`,
+   [docs/AREAS/psola.md](AREAS/psola.md)). Pitch-Synchronous Overlap-Add: grains anchored to
+   **pitch marks**, so it preserves formants for free — the classic monophonic vocal pitch-shifter,
+   and the first backend built entirely on *our* stack (not wrapped). The **pitch-mark contract**
+   lives in pitchrack (feature `pitch-marks`, ADR 0008); PSOLA consumes a `Box<dyn PitchMarker>` by
+   **injection** (marker is the caller's choice — F0-peak now, GCI next — swappable without a PSOLA
+   change), so `psola` pulls only the trait and phaserack stays FFT-free. Synthesis model is
+   **parametrized** (`PsolaMode::{Realtime, Offline}`); both share one core. `pitch_shift` /
+   `independent_pitch_and_speed` and (in Realtime) `realtime` capabilities are dynamic on the marker.
 3. **SMS — sinusoids + residual** → `parametric/` — *ambitious, differentiated; not before 1–2 are
    proven.* Spectral Modelling Synthesis reusing `sinerack` (sinusoids) + `noiserack` (stochastic
    residual) + `pitchrack` (F0): independent pitch / time / formant control by construction. Highest

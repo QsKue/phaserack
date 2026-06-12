@@ -19,11 +19,17 @@ signalsmith = ["dep:signalsmith-stretch"]
 # feature pulls only samplerack's trait (`default-features = false` → trait + Noop, no
 # `rustfft`); phaserack stays FFT-free.
 pitch-shift = ["dep:samplerack"]
+# TD-PSOLA: pitch-synchronous overlap-add, the formant-preserving vocal pitch shifter.
+# It consumes pitchrack's pitch-mark contract by injection (any `pitchrack::PitchMarker` —
+# the marker is the caller's choice), so this pulls only pitchrack's `pitch-marks` trait
+# (`default-features = false` → no detector, no `rustfft`); phaserack stays FFT-free.
+psola = ["dep:pitchrack", "pitchrack/pitch-marks"]
 
 [dependencies]
 sinerack = { git = "https://github.com/QsKue/sinerack" }
 signalsmith-stretch = { version = "0.1.3", optional = true }
 samplerack = { git = "https://github.com/QsKue/samplerack", optional = true, default-features = false }
+pitchrack = { git = "https://github.com/QsKue/pitchrack", optional = true, default-features = false }
 
 [dev-dependencies]
 # A concrete FFT-free backend (`SincResampler`) to inject when testing WSOLA pitch
