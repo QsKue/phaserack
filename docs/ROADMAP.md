@@ -38,13 +38,17 @@ documents its capabilities, latency, and gotchas in its `docs/AREAS/*` entry.
 Build in this order; each is a new module implementing `TimeStretcher`, with honest capabilities,
 `sinerack::Latency`, its own cargo feature if it pulls a dep, and a `docs/AREAS/*` entry.
 
-1. **WSOLA** → `time_domain/` — ✅ **increment 1 (time-stretch core) done**
+1. **WSOLA** → `time_domain/` — ✅ **done (both increments)**
    (`WsolaTimeStretcher`, [docs/AREAS/wsola.md](AREAS/wsola.md)). Waveform Similarity Overlap-Add:
    time-domain, similarity-search-aligned grain overlap-add. Dependency-free (FFT-free), available in
-   all builds. Streaming, multichannel, pitch-preserving time-stretch with honest capabilities
-   (`pitch_shift: false`). Validates the trait beyond Noop.
-   ⏳ *Increment 2 — pitch shift via time-stretch-then-resample* (flip `pitch_shift: true`) is the
-   remaining WSOLA work; needs a resampler.
+   all builds. Streaming, multichannel.
+   - ✅ *Increment 1 — time-stretch core* (pitch-preserving length change).
+   - ✅ *Increment 2 — pitch shift via time-stretch-then-resample.* Attach a resampler with
+     `with_resampler` (feature `pitch-shift`); WSOLA stretches by `pitch/speed` and the
+     **dependency-injected** `samplerack::Resampler` runs at `1/pitch`, giving independent pitch and
+     speed (`pitch_shift`/`independent_pitch_and_speed` become `true`). The resampler backend is the
+     caller's choice (std vs `no_std` swappable at runtime); `pitch-shift` pulls only samplerack's
+     trait, so phaserack stays FFT-free. WSOLA now satisfies `supports_realtime_autotune()`.
 2. **PSOLA** → `time_domain/` — *the high-value autotune backend.* Pitch-Synchronous Overlap-Add:
    grains anchored to detected **pitch marks**, so it preserves formants for free — the classic
    monophonic vocal pitch-shifter. Pairs with a `pitchrack` detector; this is where our own stack

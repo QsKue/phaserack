@@ -23,12 +23,17 @@ jobs:
     - name: Format
       run: cargo fmt --all --check
     # Default features pull the signalsmith backend; lint and build it.
-    - name: Clippy
+    - name: Clippy (default)
       run: cargo clippy --all-targets -- -D warnings
+    # All features adds the WSOLA pitch-shift path (pulls samplerack's trait).
+    - name: Clippy (all features)
+      run: cargo clippy --all-features --all-targets -- -D warnings
     - name: Build
       run: cargo build --verbose
-    - name: Test
+    - name: Test (default)
       run: cargo test --verbose
+    - name: Test (all features)
+      run: cargo test --all-features --verbose
 
   msrv:
     name: MSRV (1.85)

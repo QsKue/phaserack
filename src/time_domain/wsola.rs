@@ -15,10 +15,13 @@ use crate::stretcher::{
 /// picks the grain best continuing the previous one, which keeps the overlap-add
 /// phase-coherent and avoids the buzzy artifacts of plain OLA.
 ///
-/// This backend does **time-stretching only** — it advertises `pitch_shift:
-/// false`. Pitch shifting on this family is time-stretch-then-resample and lands
-/// as a later increment (see ROADMAP / ADR 0002). The grain math is FFT-free, so
-/// the struct pulls no DSP dependency and needs no cargo feature.
+/// On its own this backend does **time-stretching only** (`pitch_shift: false`). Pitch
+/// shifting on the time-domain family is *time-stretch-then-resample*: attach a resampler
+/// with [`with_resampler`](Self::with_resampler) (feature `pitch-shift`) and WSOLA
+/// stretches by `pitch/speed` while the resampler runs at `1/pitch`, giving independent
+/// pitch and speed. The resampler is dependency-injected, so the backend (and the std vs
+/// `no_std` trade-off) is the caller's choice; capabilities reflect whether one is present.
+/// The grain math itself is FFT-free and pulls no DSP dependency.
 ///
 /// Built for one fixed `(sample_rate, channels)`; a caller that changes format
 /// must build a new stretcher (same contract as the signalsmith backend).
@@ -52,10 +55,32 @@ pub struct WsolaTimeStretcher {
     /// Un-finalized tail of the synthesis overlap-add (interleaved, `synth_hop`
     /// frames) — the second half of the last grain, awaiting the next grain.
     tail: Vec<f32>,
-    /// Finalized output not yet handed back to the caller, interleaved.
+    /// Finalized *stretched* output not yet delivered, interleaved. When a resampler is
+    /// attached this is an intermediate stage feeding `resampled_hold`; otherwise it is
+    /// the delivery queue directly.
     out_hold: VecDeque<f32>,
     /// True once the first grain has primed `tail`/`target`.
     primed: bool,
+
+    /// Optional resampler enabling pitch shifting (time-stretch-then-resample). When
+    /// attached, WSOLA stretches by `pitch/speed` and the resampler runs at `1/pitch`, so
+    /// the net transform is duration `input/speed`, pitch `× pitch`. The backend is the
+    /// caller's choice (any [`samplerack::Resampler`]), swappable by re-injecting.
+    #[cfg(feature = "pitch-shift")]
+    resampler: Option<Box<dyn samplerack::Resampler>>,
+    /// Resampled output awaiting the caller (interleaved) — the delivery queue when a
+    /// resampler is attached.
+    #[cfg(feature = "pitch-shift")]
+    resampled_hold: VecDeque<f32>,
+    /// Reused contiguous staging for the resampler's input and output.
+    #[cfg(feature = "pitch-shift")]
+    resample_in: Vec<f32>,
+    #[cfg(feature = "pitch-shift")]
+    resample_out: Vec<f32>,
+    /// Set once the end-of-stream pipeline drain has run, so repeated `flush` calls don't
+    /// re-finalize the tail.
+    #[cfg(feature = "pitch-shift")]
+    pitch_flushed: bool,
 }
 
 impl WsolaTimeStretcher {
@@ -92,17 +117,60 @@ impl WsolaTimeStretcher {
             tail: vec![0.0; synth_hop * channels],
             out_hold: VecDeque::new(),
             primed: false,
+            #[cfg(feature = "pitch-shift")]
+            resampler: None,
+            #[cfg(feature = "pitch-shift")]
+            resampled_hold: VecDeque::new(),
+            #[cfg(feature = "pitch-shift")]
+            resample_in: Vec::new(),
+            #[cfg(feature = "pitch-shift")]
+            resample_out: vec![0.0; 4096 * channels],
+            #[cfg(feature = "pitch-shift")]
+            pitch_flushed: false,
         })
+    }
+
+    /// Attaches a resampler, enabling pitch shifting (time-stretch-then-resample). WSOLA
+    /// drives the resampler's ratio from the pitch param (so the caller need not), and the
+    /// caller picks the backend — any [`samplerack::Resampler`], so std vs `no_std` is
+    /// swappable by re-injecting. The resampler must be built for this stretcher's channel
+    /// count. Without one, WSOLA is time-stretch only (honest `capabilities`).
+    #[cfg(feature = "pitch-shift")]
+    pub fn with_resampler(mut self, mut resampler: Box<dyn samplerack::Resampler>) -> Self {
+        let p = 2.0_f64.powf(self.params.pitch_semitones as f64 / 12.0);
+        resampler.set_ratio(1.0 / p);
+        self.resampler = Some(resampler);
+        self
     }
 
     fn format_matches(&self, sample_rate: u32, channels: usize) -> bool {
         self.sample_rate == sample_rate && self.channels == channels
     }
 
-    /// Analysis hop `Ha = Hs * speed_ratio`. At `speed > 1` (faster playback) the
-    /// analysis pointer advances faster than synthesis → shorter output.
+    /// The pitch multiplier `2^(semitones/12)` — but only when a resampler is attached,
+    /// since this backend can shift pitch *only* through the injected resampler. `1.0`
+    /// otherwise, so the stretch math collapses to pure time-stretching.
+    fn pitch_ratio(&self) -> f64 {
+        #[cfg(feature = "pitch-shift")]
+        if self.resampler.is_some() {
+            return 2.0_f64.powf(self.params.pitch_semitones as f64 / 12.0);
+        }
+        1.0
+    }
+
+    /// Whether output is routed through the resampler (a resampler is attached). When
+    /// true the delivery queue is `resampled_hold`; otherwise it is `out_hold`.
+    #[cfg(feature = "pitch-shift")]
+    fn resampling_active(&self) -> bool {
+        self.resampler.is_some()
+    }
+
+    /// Analysis hop `Ha = Hs * (speed / pitch)`. Speed alone sets the stretch; pitch
+    /// shifting adds an extra `1/pitch` stretch here that the resampler later undoes in
+    /// length while keeping the pitch change. `pitch` is `1.0` without a resampler.
     fn analysis_hop(&self) -> f64 {
-        self.synth_hop as f64 * self.params.speed_ratio.max(f32::EPSILON) as f64
+        let effective_speed = self.params.speed_ratio.max(f32::EPSILON) as f64 / self.pitch_ratio();
+        self.synth_hop as f64 * effective_speed.max(f64::EPSILON)
     }
 
     /// Per-channel frames currently buffered.
@@ -238,14 +306,106 @@ impl WsolaTimeStretcher {
         }
     }
 
-    /// Moves up to `out_capacity_frames` from `out_hold` into `output`.
-    fn drain(&mut self, output: &mut [f32], out_capacity_frames: usize) -> usize {
-        let frames = out_capacity_frames.min(self.out_hold.len() / self.channels);
-        for slot in output.iter_mut().take(frames * self.channels) {
-            *slot = self.out_hold.pop_front().unwrap();
+    /// How many *stretched* frames to target this call so that, after the resampler's
+    /// `1/pitch` rate change, the caller's `out_capacity_frames` can be filled. Without a
+    /// resampler this is just the capacity. A `synth_hop` margin keeps the resampler fed.
+    fn stretched_target_frames(&self, out_capacity_frames: usize) -> usize {
+        #[cfg(feature = "pitch-shift")]
+        if self.resampling_active() {
+            return (out_capacity_frames as f64 * self.pitch_ratio()).ceil() as usize
+                + self.synth_hop;
         }
-        frames
+        out_capacity_frames
     }
+
+    /// Finalizes the WSOLA overlap-add tail (the un-overlapped second half of the last
+    /// grain) into `out_hold`, once. Returns true if it produced frames.
+    fn finalize_wsola_tail(&mut self) -> bool {
+        if !self.primed {
+            return false;
+        }
+        let h = self.synth_hop;
+        let ch = self.channels;
+        for i in 0..h {
+            for c in 0..ch {
+                self.out_hold.push_back(self.tail[i * ch + c]);
+            }
+        }
+        self.tail.iter_mut().for_each(|t| *t = 0.0);
+        self.primed = false;
+        true
+    }
+
+    /// Streams all currently-stretched frames in `out_hold` through the resampler into
+    /// `resampled_hold` (the resampler buffers its filter lookahead internally). No-op
+    /// when no resampler is attached.
+    #[cfg(feature = "pitch-shift")]
+    fn pump_resampler(&mut self) {
+        if !self.resampling_active() || self.out_hold.is_empty() {
+            return;
+        }
+        let ch = self.channels;
+        self.resample_in.clear();
+        self.resample_in.extend(self.out_hold.drain(..));
+        let resampler = self.resampler.as_mut().unwrap();
+        // samplerack consumes the whole input slice and emits partial output, so feed
+        // once then drain the rest from its history with empty calls.
+        let mut first = true;
+        loop {
+            let input: &[f32] = if first { &self.resample_in } else { &[] };
+            first = false;
+            let res = resampler.process(input, &mut self.resample_out, ch);
+            if res.output_frames_written == 0 {
+                break;
+            }
+            self.resampled_hold
+                .extend(&self.resample_out[..res.output_frames_written * ch]);
+        }
+    }
+
+    /// Drains the resampler's internal tail (filter lookahead) into `resampled_hold` at
+    /// end of stream. No-op when no resampler is attached.
+    #[cfg(feature = "pitch-shift")]
+    fn flush_resampler_tail(&mut self) {
+        if !self.resampling_active() {
+            return;
+        }
+        let ch = self.channels;
+        let resampler = self.resampler.as_mut().unwrap();
+        loop {
+            let n = resampler.flush(&mut self.resample_out, ch);
+            if n == 0 {
+                break;
+            }
+            self.resampled_hold.extend(&self.resample_out[..n * ch]);
+        }
+    }
+
+    /// Moves up to `out_capacity_frames` of *delivery* output into `output`. The delivery
+    /// queue is the resampled output when a resampler is attached, else the stretched
+    /// output directly.
+    fn drain(&mut self, output: &mut [f32], out_capacity_frames: usize) -> usize {
+        let ch = self.channels;
+        #[cfg(feature = "pitch-shift")]
+        if self.resampling_active() {
+            return drain_queue(&mut self.resampled_hold, output, out_capacity_frames, ch);
+        }
+        drain_queue(&mut self.out_hold, output, out_capacity_frames, ch)
+    }
+}
+
+/// Pops up to `cap_frames` whole frames from `q` into `output`, returning frames moved.
+fn drain_queue(
+    q: &mut VecDeque<f32>,
+    output: &mut [f32],
+    cap_frames: usize,
+    channels: usize,
+) -> usize {
+    let frames = cap_frames.min(q.len() / channels);
+    for slot in output.iter_mut().take(frames * channels) {
+        *slot = q.pop_front().unwrap();
+    }
+    frames
 }
 
 impl TimeStretcher for WsolaTimeStretcher {
@@ -266,10 +426,15 @@ impl TimeStretcher for WsolaTimeStretcher {
             return TimeStretchProcessResult::default();
         }
 
-        // Take the whole input block into our buffer, then produce what fits.
+        // Take the whole input block into our buffer, produce enough stretched output to
+        // fill the request (accounting for the resampler's rate change), run the resampler
+        // stage when attached, then deliver what fits.
         self.in_buf
             .extend_from_slice(&input[..input_frames * channels]);
-        self.generate(out_capacity_frames * channels);
+        let target = self.stretched_target_frames(out_capacity_frames);
+        self.generate(target * channels);
+        #[cfg(feature = "pitch-shift")]
+        self.pump_resampler();
         let written = self.drain(output, out_capacity_frames);
 
         TimeStretchProcessResult {
@@ -287,23 +452,31 @@ impl TimeStretcher for WsolaTimeStretcher {
             return 0;
         }
 
-        // Drain whatever is already finalized first.
+        // Pitch-shift path: the pipeline is WSOLA → resampler, so the end-of-stream drain
+        // must flush both stages. Deliver any ready resampled output first; otherwise run
+        // the whole remaining pipeline once (guarded), then deliver.
+        #[cfg(feature = "pitch-shift")]
+        if self.resampling_active() {
+            if !self.resampled_hold.is_empty() {
+                return self.drain(output, out_capacity_frames);
+            }
+            if !self.pitch_flushed {
+                self.pump_resampler(); // any stretched frames still queued
+                self.finalize_wsola_tail(); // WSOLA tail → out_hold
+                self.pump_resampler(); // tail → resampled_hold
+                self.flush_resampler_tail(); // resampler delay line → resampled_hold
+                self.pitch_flushed = true;
+                return self.drain(output, out_capacity_frames);
+            }
+            return 0;
+        }
+
+        // Time-stretch-only path: drain finalized output, then finalize the WSOLA tail
+        // (the un-overlapped second half of the last grain) once.
         if !self.out_hold.is_empty() {
             return self.drain(output, out_capacity_frames);
         }
-
-        // Nothing buffered to emit and no grains left to form: finalize the tail
-        // (the un-overlapped second half of the last grain) once.
-        if self.primed {
-            let h = self.synth_hop;
-            let ch = self.channels;
-            for i in 0..h {
-                for c in 0..ch {
-                    self.out_hold.push_back(self.tail[i * ch + c]);
-                }
-            }
-            self.tail.iter_mut().for_each(|t| *t = 0.0);
-            self.primed = false;
+        if self.finalize_wsola_tail() {
             return self.drain(output, out_capacity_frames);
         }
 
@@ -318,20 +491,44 @@ impl TimeStretcher for WsolaTimeStretcher {
         self.tail.iter_mut().for_each(|t| *t = 0.0);
         self.out_hold.clear();
         self.primed = false;
+        #[cfg(feature = "pitch-shift")]
+        {
+            self.resampled_hold.clear();
+            self.pitch_flushed = false;
+            if let Some(r) = self.resampler.as_mut() {
+                r.reset();
+            }
+        }
     }
 
     fn latency(&self) -> Latency {
-        // We require search + frame + synth_hop frames of lookahead before a grain
-        // can be formed; report it as input-side latency.
-        Latency::new(self.search + self.frame + self.synth_hop, 0, 0)
+        // WSOLA needs search + frame + synth_hop frames of lookahead before a grain can
+        // form (input-side latency); a pitch-shift resampler adds its own on top.
+        let base = Latency::new(self.search + self.frame + self.synth_hop, 0, 0);
+        #[cfg(feature = "pitch-shift")]
+        if let Some(r) = self.resampler.as_ref() {
+            let rl = r.latency();
+            return Latency::new(
+                base.input_frames + rl.input_frames,
+                base.output_frames + rl.output_frames,
+                base.lookahead_frames + rl.lookahead_frames,
+            );
+        }
+        base
     }
 
     fn capabilities(&self) -> TimeStretcherCapabilities {
+        // Pitch shifting (and thus independent pitch/speed) is available only when a
+        // resampler is attached — honest, dynamic capabilities.
+        #[cfg(feature = "pitch-shift")]
+        let can_pitch = self.resampler.is_some();
+        #[cfg(not(feature = "pitch-shift"))]
+        let can_pitch = false;
         TimeStretcherCapabilities {
             realtime: true,
-            pitch_shift: false,
+            pitch_shift: can_pitch,
             time_stretch: true,
-            independent_pitch_and_speed: false,
+            independent_pitch_and_speed: can_pitch,
         }
     }
 
@@ -346,12 +543,19 @@ impl TimeStretcher for WsolaTimeStretcher {
         } else {
             0.0
         };
-        // pitch_semitones is stored for honest `params()` reflection but not
-        // applied: this backend is time-stretch only (see `capabilities`).
         self.params = TimeStretcherParams {
             speed_ratio,
             pitch_semitones,
         };
+        // Pitch is applied only via the resampler: stretch by pitch (in `analysis_hop`),
+        // then resample at `1/pitch` to restore length while keeping the pitch change.
+        // Without a resampler `pitch_semitones` is stored for honest `params()` reflection
+        // but not applied (this backend can't shift pitch on its own — see `capabilities`).
+        #[cfg(feature = "pitch-shift")]
+        if let Some(r) = self.resampler.as_mut() {
+            let p = 2.0_f64.powf(pitch_semitones as f64 / 12.0);
+            r.set_ratio(1.0 / p);
+        }
     }
 
     fn params(&self) -> TimeStretcherParams {
@@ -540,7 +744,127 @@ mod tests {
         let st = WsolaTimeStretcher::new(SR, 1).unwrap();
         let caps = st.capabilities();
         assert!(caps.time_stretch);
-        assert!(!caps.pitch_shift, "WSOLA increment 1 is time-stretch only");
+        assert!(
+            !caps.pitch_shift,
+            "WSOLA with no resampler is time-stretch only"
+        );
         assert!(!caps.supports_realtime_autotune());
+    }
+
+    // --- pitch shifting (increment 2): time-stretch-then-resample with an injected
+    // samplerack backend (the FFT-free SincResampler here). ---
+
+    #[cfg(feature = "pitch-shift")]
+    fn sinc_resampler(channels: usize) -> Box<dyn samplerack::Resampler> {
+        Box::new(samplerack::SincResampler::with_ratio(1.0, channels))
+    }
+
+    #[cfg(feature = "pitch-shift")]
+    #[test]
+    fn attaching_a_resampler_enables_autotune_capabilities() {
+        let st = WsolaTimeStretcher::new(SR, 1)
+            .unwrap()
+            .with_resampler(sinc_resampler(1));
+        let caps = st.capabilities();
+        assert!(caps.pitch_shift, "a resampler enables pitch shifting");
+        assert!(caps.independent_pitch_and_speed);
+        assert!(caps.supports_realtime_autotune());
+    }
+
+    #[cfg(feature = "pitch-shift")]
+    #[test]
+    fn pitch_up_an_octave_doubles_frequency_keeps_duration() {
+        let mut st = WsolaTimeStretcher::new(SR, 1)
+            .unwrap()
+            .with_resampler(sinc_resampler(1));
+        st.set_params(TimeStretcherParams {
+            speed_ratio: 1.0,
+            pitch_semitones: 12.0, // +1 octave → ×2
+        });
+        let input = sine(440.0, 44_100, 1);
+        let out = run(&mut st, &input, 1);
+
+        let dur = frames(&out, 1) as f32 / frames(&input, 1) as f32;
+        assert!(
+            (dur - 1.0).abs() < 0.1,
+            "duration ratio {dur} should stay ~1.0"
+        );
+        let f = est_freq(&out, 1);
+        assert!(
+            (f - 880.0).abs() < 40.0,
+            "pitch {f} should be ~880 (octave up)"
+        );
+    }
+
+    #[cfg(feature = "pitch-shift")]
+    #[test]
+    fn pitch_down_an_octave_halves_frequency_keeps_duration() {
+        let mut st = WsolaTimeStretcher::new(SR, 1)
+            .unwrap()
+            .with_resampler(sinc_resampler(1));
+        st.set_params(TimeStretcherParams {
+            speed_ratio: 1.0,
+            pitch_semitones: -12.0, // −1 octave → ×0.5
+        });
+        let input = sine(440.0, 44_100, 1);
+        let out = run(&mut st, &input, 1);
+
+        let dur = frames(&out, 1) as f32 / frames(&input, 1) as f32;
+        assert!(
+            (dur - 1.0).abs() < 0.1,
+            "duration ratio {dur} should stay ~1.0"
+        );
+        let f = est_freq(&out, 1);
+        assert!(
+            (f - 220.0).abs() < 25.0,
+            "pitch {f} should be ~220 (octave down)"
+        );
+    }
+
+    #[cfg(feature = "pitch-shift")]
+    #[test]
+    fn pitch_and_speed_are_independent() {
+        // speed 0.5 (2× longer) + pitch +12 (octave up): duration ~2×, pitch ~880.
+        let mut st = WsolaTimeStretcher::new(SR, 1)
+            .unwrap()
+            .with_resampler(sinc_resampler(1));
+        st.set_params(TimeStretcherParams {
+            speed_ratio: 0.5,
+            pitch_semitones: 12.0,
+        });
+        let input = sine(440.0, 44_100, 1);
+        let out = run(&mut st, &input, 1);
+
+        let dur = frames(&out, 1) as f32 / frames(&input, 1) as f32;
+        assert!(
+            dur > 1.8 && dur < 2.2,
+            "duration ratio {dur} should be ~2.0"
+        );
+        let f = est_freq(&out, 1);
+        assert!((f - 880.0).abs() < 45.0, "pitch {f} should be ~880");
+    }
+
+    #[cfg(feature = "pitch-shift")]
+    #[test]
+    fn zero_semitones_with_resampler_preserves_pitch() {
+        // A pitch-capable WSOLA sitting at 0 semitones is a pure time-stretch (resampler
+        // at ratio 1): pitch must stay put even though output routes through the resampler.
+        let mut st = WsolaTimeStretcher::new(SR, 1)
+            .unwrap()
+            .with_resampler(sinc_resampler(1));
+        st.set_params(TimeStretcherParams {
+            speed_ratio: 0.5,
+            pitch_semitones: 0.0,
+        });
+        let input = sine(440.0, 44_100, 1);
+        let out = run(&mut st, &input, 1);
+
+        let dur = frames(&out, 1) as f32 / frames(&input, 1) as f32;
+        assert!(
+            dur > 1.8 && dur < 2.2,
+            "duration ratio {dur} should be ~2.0"
+        );
+        let f = est_freq(&out, 1);
+        assert!((f - 440.0).abs() < 20.0, "pitch {f} should stay ~440");
     }
 }

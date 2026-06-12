@@ -13,10 +13,32 @@ avoiding plain-OLA buzz.
 
 ## Capabilities
 
-Honest `TimeStretcherCapabilities`: `realtime: true`, `time_stretch: true`,
-**`pitch_shift: false`**, `independent_pitch_and_speed: false`. It does **not** satisfy
-`supports_realtime_autotune()` — that needs pitch shift. Pitch shifting on this family is
-time-stretch-then-resample and is a planned later increment (see ROADMAP / ADR 0002).
+**Dynamic, depending on whether a resampler is attached** (honest capabilities):
+- **No resampler** (the default, and the only option without the `pitch-shift` feature):
+  `time_stretch: true`, `pitch_shift: false`, `independent_pitch_and_speed: false`. Does not
+  satisfy `supports_realtime_autotune()`.
+- **With a resampler** (`with_resampler`, feature `pitch-shift`): `pitch_shift: true` and
+  `independent_pitch_and_speed: true`, so it **does** satisfy `supports_realtime_autotune()`.
+
+## Pitch shifting (increment 2 — time-stretch-then-resample)
+
+Pitch shifting on the time-domain family is *stretch then resample*. Attach a resampler with
+`with_resampler(Box<dyn samplerack::Resampler>)` (feature `pitch-shift`, which pulls only
+samplerack's trait — `default-features = false`, no `rustfft`, so phaserack stays FFT-free).
+The resampler is **dependency-injected**, so the backend — and the std vs `no_std` trade-off —
+is the caller's choice, swappable at runtime by re-injecting (ADR 0002 §3 wraps; the resampler
+half is samplerack ADR 0001/0003).
+
+The math, for pitch ratio `p = 2^(semitones/12)` and `speed_ratio s`:
+- WSOLA stretches by `p/s` — its `analysis_hop` uses **effective speed `s/p`**.
+- The injected resampler runs at ratio **`1/p`** (WSOLA drives `set_ratio` from the pitch param).
+- Net: duration `input/s`, pitch `× p` — independent pitch and speed.
+
+The pipeline is `process → generate (stretched) → out_hold → pump_resampler → resampled_hold →
+deliver`. When a resampler is attached, **all** output routes through it (even at 0 semitones,
+where it runs at ratio 1) so there is no queue-switch discontinuity when the pitch sweeps
+through zero — i.e. it stays click-free. `latency()` then sums WSOLA's lookahead and the
+resampler's latency; `reset()`/`flush` drain both stages.
 
 ## How it works (the streaming model)
 
@@ -48,14 +70,22 @@ time-stretch-then-resample and is a planned later increment (see ROADMAP / ADR 0
   last grain's un-overlapped tail once. Skipping it drops the final ~`Hs` frames.
 - **Fixed format.** Built for one `(sample_rate, channels)`; `process`/`flush` return
   empty/`0` if called with a different format. Changing format means a new stretcher.
-- **`pitch_semitones` is stored but not applied** (kept only so `params()` reflects what was
-  set). Setting it does nothing audible until the pitch-shift increment lands.
-- **Reset.** `reset()` clears all streaming state; a reused-then-reset stretcher produces
-  byte-identical output to a fresh one (asserted by `reset_clears_state`).
+- **`pitch_semitones` without a resampler is stored but not applied** (kept only so `params()`
+  reflects what was set) — this backend can shift pitch *only* through the injected resampler.
+- **Resampler ratio bookkeeping.** Pitch up (`p > 1`) means resampler ratio `1/p < 1`
+  (downsample, raises pitch); the samplerack sinc backend rebuilds its kernel table only when
+  the cutoff moves (pitch up), so continuous up-sweeps cost a per-change table rebuild, down-
+  sweeps don't. WSOLA owns the ratio; the caller never sets it.
+- **Reset.** `reset()` clears all streaming state **and** the resampler (`resampler.reset()` +
+  `resampled_hold`); a reused-then-reset stretcher produces byte-identical output to a fresh one.
 
 ## Tests
 
-`#[cfg(test)] mod tests` in the same file: format rejection, length scaling at speed
-1.0 / 0.5 / 2.0, **pitch preservation while stretching** (zero-crossing freq estimate stays
-~440 Hz at 2× stretch — the defining TSM property), finite/bounded output, silence→silence,
-reset-equals-fresh, and honest capabilities.
+`#[cfg(test)] mod tests` in the same file. Time-stretch (always): format rejection, length
+scaling at speed 1.0 / 0.5 / 2.0, **pitch preservation while stretching** (zero-crossing freq
+stays ~440 Hz at 2× stretch — the defining TSM property), finite/bounded output,
+silence→silence, reset-equals-fresh, honest capabilities. Pitch-shift (`#[cfg(feature =
+"pitch-shift")]`, injecting a `samplerack::SincResampler`): a resampler enables the autotune
+capabilities; octave-up doubles frequency and octave-down halves it, both keeping duration;
+pitch and speed are independent (0.5× speed + octave up); and 0 semitones through the resampler
+preserves pitch. Run with `cargo test --features pitch-shift`.
