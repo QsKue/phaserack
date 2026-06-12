@@ -46,12 +46,22 @@ The synthesis core is shared; the mode only changes *when* it runs:
 Both produce near-identical output (a test asserts it). The caller picks the mode when building the
 shifter — the same "parametrize, user chooses" pattern as the resampler backend and the marker.
 
+## Amplitude (window-sum normalization)
+
+Re-spacing the grains for a pitch shift breaks the Hann constant-overlap, so without correction
+pitch-up comes out ~louder and pitch-down quieter (in proportion to the pitch ratio). A parallel
+per-frame **window accumulator** (`wacc`) sums the overlapped window values, and the output is
+divided by it at finalization (`out = acc / max(wacc, 0.1)`). The `0.1` floor caps the gain so
+near-zero-coverage gaps stay quiet instead of amplifying noise. Loudness is then constant across
+pitch shifts. Large pitch-*down* still carries some inherent overlap ripple (grains abut at ~0%
+overlap) — a documented TD-PSOLA property, not a normalization failure.
+
 ## Streaming mechanics
 
 Absolute per-channel frame addressing throughout (`in_start`, `acc_start`). `input_at` zero-pads
 outside the buffer (only the first grain, at frame 0). An output overlap-add accumulator (`acc` +
-`acc_start`) is grown at the back per grain and finalized at the front once `synth_pos − max_period`
-passes a frame (no future grain can reach it). `trim` keeps two max-periods of slack behind
+`wacc` + `acc_start`) is grown at the back per grain and finalized (and normalized) at the front
+once `synth_pos − max_period` passes a frame (no future grain can reach it). `trim` keeps two max-periods of slack behind
 `anal_pos`, so a live grain never reaches genuinely-discarded input. `latency()` reports the
 algorithmic minimum (`2·max_period`); Offline's effective latency is the whole stream (the engine
 treats it as non-realtime).
