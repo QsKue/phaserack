@@ -15,7 +15,32 @@ contract + Noop stay dependency-free.
   `TimeStretcher` impl.
 - `new(sample_rate, channels) -> Result<Self, String>` — rejects zero sample rate / zero channels,
   builds the underlying stretch with `preset_default`.
+- `with_block_length(sample_rate, channels, block_length) -> Result<Self, String>` — builds with an
+  explicit FFT block (interval `block_length / 4`) instead of the preset. See **Pitch-shift accuracy**.
 - `format_matches(sample_rate, channels)` — the per-call format guard.
+
+## Pitch-shift accuracy vs FFT block (important)
+
+SignalSmith is a **phase vocoder**: its pitch precision is set by the FFT block via the frequency
+resolution `Δf = sample_rate / block`. At **low frequencies** a short block resolves the note coarsely
+(few cycles per window), so a pitch *shift undershoots* — the output lands sharp of the target. The
+error scales ~inversely with pitch. Measured at 48 kHz, shifting −35¢ and re-detecting (see
+`mixrack/tests/shifter_accuracy.rs` and `tests/signalsmith_accuracy.rs`):
+
+| block (samples) | input latency | C3 (~131 Hz) | A4 (440 Hz) |
+| --- | --- | --- | --- |
+| `preset_default` (~2880) | ~60 ms | **+8…+18¢** | +2…+3¢ |
+| 12288 | ~128 ms | +2¢ | +3¢ |
+| 16384 | ~171 ms | ~0¢ | +1¢ |
+
+So: **the default preset is fine for typical/high vocal range but undershoots noticeably at low notes
+(≈C3)**. It is *not* a SignalSmith defect — it is the inherent STFT resolution/latency trade, and the
+preset deliberately favours latency. Use `with_block_length` (≈12–16 k at 48 kHz) when low-note
+accuracy matters and the added latency is acceptable. For low notes with *no* latency penalty, the
+time-domain **PSOLA** backend lands ~0¢ (see `psola.md`). This was long-standing behaviour (preset has
+been used since the crate's first commit); it only became visible once consumers added a detector on
+the *output* — and the prior end-to-end tests missed it because they tested at A4 with loose,
+relative tolerances.
 
 ## Patterns to follow
 

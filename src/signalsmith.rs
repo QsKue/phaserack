@@ -14,6 +14,11 @@ pub struct SignalSmithTimeStretcher {
 }
 
 impl SignalSmithTimeStretcher {
+    /// Builds the stretcher with signalsmith's **default preset** (block/interval derived from
+    /// the sample rate). Lower latency, but the short FFT block limits pitch-shift accuracy at
+    /// low frequencies — the resolution `Δf = sample_rate / block` is a large fraction of a low
+    /// note, so a shift undershoots there (e.g. ~8¢ at C3, ~2¢ at A4). Use
+    /// [`with_block_length`](Self::with_block_length) to trade latency for low-note accuracy.
     pub fn new(sample_rate: u32, channels: usize) -> Result<Self, String> {
         if sample_rate == 0 {
             return Err("sample rate must be greater than zero".to_string());
@@ -24,6 +29,37 @@ impl SignalSmithTimeStretcher {
 
         Ok(Self {
             stretch: signalsmith_stretch::Stretch::preset_default(channels as u32, sample_rate),
+            channels,
+            sample_rate,
+            params: TimeStretcherParams::default(),
+            tail_frames_remaining: 0,
+        })
+    }
+
+    /// Builds the stretcher with an explicit FFT **`block_length`** (samples) and an interval of
+    /// `block_length / 4` (signalsmith's conventional 4× overlap). A larger block sharpens
+    /// low-frequency pitch-shift accuracy — the frequency resolution `Δf = sample_rate / block`
+    /// shrinks, so low notes (few cycles per window) are resolved precisely — at the cost of
+    /// proportionally more latency (~`block` input frames). Measured at 48 kHz: block 2880
+    /// (~preset) ≈ 8¢ at C3, block 12288 ≈ 2¢, block 16384 ≈ 0¢ (see the shifter-accuracy test).
+    pub fn with_block_length(
+        sample_rate: u32,
+        channels: usize,
+        block_length: usize,
+    ) -> Result<Self, String> {
+        if sample_rate == 0 {
+            return Err("sample rate must be greater than zero".to_string());
+        }
+        if channels == 0 {
+            return Err("channel count must be greater than zero".to_string());
+        }
+        if block_length < 4 {
+            return Err("block length must be at least 4 samples".to_string());
+        }
+
+        let interval = (block_length / 4).max(1);
+        Ok(Self {
+            stretch: signalsmith_stretch::Stretch::new(channels as u32, block_length, interval),
             channels,
             sample_rate,
             params: TimeStretcherParams::default(),
